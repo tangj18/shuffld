@@ -71,49 +71,74 @@ const PRESETS = [
   { rows: 5, cols: 5 },
 ];
 
-/* ---------- image library ---------- */
-const makeArt = (c1, c2, c3) => {
-  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='900' height='600' viewBox='0 0 900 600'>
-    <defs><radialGradient id='g' cx='40%' cy='35%' r='82%'>
-      <stop offset='0%' stop-color='${c1}'/><stop offset='58%' stop-color='${c2}'/>
-      <stop offset='100%' stop-color='${c3}'/></radialGradient></defs>
-    <rect width='900' height='600' fill='url(#g)'/>
-    <g fill='none' stroke='rgba(255,255,255,.22)' stroke-width='2'>
-      <circle cx='300' cy='240' r='150'/><circle cx='640' cy='380' r='200'/><circle cx='500' cy='120' r='95'/></g>
-    <g fill='rgba(255,255,255,.92)'>
-      <circle cx='250' cy='180' r='4'/><circle cx='690' cy='250' r='5'/><circle cx='430' cy='440' r='4'/>
-      <circle cx='560' cy='150' r='3'/><circle cx='150' cy='340' r='3'/><circle cx='800' cy='470' r='4'/></g>
-  </svg>`;
-  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+const SPLASH_ROOT = "/lol-splashes";
+
+const slug = (value) =>
+  String(value)
+    .replace(/[^A-Za-z0-9._-]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+const getSplashPath = (champion, skinNumber, skinName) => {
+  const filename = `${String(skinNumber).padStart(2, "0")}_${slug(skinName)}.webp`;
+
+  return `${SPLASH_ROOT}/${slug(champion)}/${filename}`;
 };
 
-const championImageModules = import.meta.glob(
-  "/src/assets/R/*.{jpg,jpeg,JPG,JPEG}",
-  {
-    eager: true,
-    query: "?url",
-    import: "default",
-  },
-);
+const loadSplashLibrary = async () => {
+  const response = await fetch(`${SPLASH_ROOT}/manifest.json`);
 
-const IMAGE_LIBRARY = Object.entries(championImageModules)
-  .map(([path, url]) => {
-    const fileName = path
-      .split("/")
-      .pop()
-      .replace(/\.(jpg|jpeg)$/i, "")
-      .replace(/_HD$/i, "");
+  if (!response.ok) {
+    throw new Error(`Could not load manifest.json (HTTP ${response.status})`);
+  }
 
-    const parts = fileName.split("_");
-    const champion = parts.shift();
-    const skin = parts.join(" ");
+  const manifest = await response.json();
 
-    return {
-      title: skin ? `${champion} — ${skin}` : champion,
-      url,
-    };
-  })
-  .sort((a, b) => a.title.localeCompare(b.title));
+  if (!Array.isArray(manifest.skins)) {
+    throw new Error("manifest.json does not contain a skins array.");
+  }
+
+  return manifest.skins
+    .map((skin) => ({
+      title: `${skin.champion} — ${skin.name}`,
+      url: getSplashPath(skin.champion, skin.num, skin.name),
+    }))
+    .sort((a, b) => a.title.localeCompare(b.title));
+};
+// UTC date key so every player sees the same splash at the same moment,
+// regardless of timezone. Rolls over at 00:00 UTC.
+const dayKey = (date = new Date()) => date.toISOString().slice(0, 10);
+
+// FNV-1a — small, stable, and gives a well-spread index from the date string.
+const hashString = (str) => {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+};
+
+// `library` is sorted by title, so the same index means the same splash for
+// everyone loading the same manifest.
+const pickDailyImage = (library, key = dayKey()) =>
+  library.length ? library[hashString(key) % library.length] : null;
+
+// mulberry32 — a given seed always replays the same sequence, so the daily
+// scramble is identical for every player instead of per-load random.
+const makeRng = (seed) => {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+};
+
+// Grid size is part of the seed: switching presets should give a genuinely
+// different board, not a re-cut of the same scramble.
+const dailyRng = (rows, cols, key = dayKey()) =>
+  makeRng(hashString(`${key}:${rows}x${cols}`));
 
 // Accepts: ["url", ...] | [{url,title?}, ...] | {images:[...]}
 const normalizeList = (data) => {
@@ -150,7 +175,7 @@ const neighborsOf = (slot, rows, cols) => {
 const isSolved = (slots) => slots.every((piece, i) => piece === i);
 
 // slots[slot] = piece currently in that slot. Blank piece = total-1.
-const makeShuffled = (rows, cols) => {
+const makeShuffled = (rows, cols, rng = Math.random) => {
   const total = rows * cols;
   const blank = total - 1;
   let slots = Array.from({ length: total }, (_, i) => i); // solved
@@ -159,14 +184,16 @@ const makeShuffled = (rows, cols) => {
   const steps = Math.max(80, total * 45);
   for (let k = 0; k < steps; k++) {
     const nbrs = neighborsOf(blankSlot, rows, cols).filter((n) => n !== prev);
-    const target = nbrs[Math.floor(Math.random() * nbrs.length)];
+    const target = nbrs[Math.floor(rng() * nbrs.length)];
     // slide the piece at `target` into the blank slot
     slots[blankSlot] = slots[target];
     slots[target] = blank;
     prev = blankSlot;
     blankSlot = target;
   }
-  if (isSolved(slots)) return makeShuffled(rows, cols); // never hand back a solved board
+  // Pass `rng` down so the retry advances the same stream — a re-seeded
+  // generator would replay the identical solved board and recurse forever.
+  if (isSolved(slots)) return makeShuffled(rows, cols, rng);
   return slots;
 };
 
@@ -193,13 +220,51 @@ const fmtTime = (s) => {
   return `${m}:${r.toString().padStart(2, "0")}`;
 };
 
+const solvedSlots = (rows, cols) =>
+  Array.from({ length: rows * cols }, (_, i) => i);
+
+/* ---------- daily result, persisted per browser ---------- *
+ * One record, overwritten each day, so it cleans up after itself. Every
+ * access is guarded: localStorage throws on access in some privacy modes
+ * rather than just being empty, and a failure here should cost persistence,
+ * not the game.
+ * ------------------------------------------------------------------ */
+const STORAGE_KEY = "sliding-puzzle:daily:v1";
+
+const readDailyRecord = () => {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const record = JSON.parse(raw);
+    // A record from a previous day is stale — today's puzzle is unplayed.
+    if (!record || record.day !== dayKey() || !record.solved) return null;
+    return record;
+  } catch {
+    return null;
+  }
+};
+
+const writeDailyRecord = (record) => {
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(record));
+  } catch {
+    /* storage unavailable or full — the session still plays fine */
+  }
+};
+
 export default function SlidingPuzzle() {
-  const [grid, setGrid] = useState({ rows: 3, cols: 5 });
+  const [grid, setGrid] = useState({ rows: 3, cols: 4 });
+  // Read once on mount. If today's puzzle is already done, the board starts
+  // finished and stays that way.
+  const [restored] = useState(readDailyRecord);
+  const [completed, setCompleted] = useState(() => Boolean(restored));
   const [image, setImage] = useState(DEFAULT_IMAGE);
   const [aspect, setAspect] = useState(DEFAULT_ASPECT);
-  const [slots, setSlots] = useState(() => makeShuffled(3, 5));
-  const [moves, setMoves] = useState(0);
-  const [seconds, setSeconds] = useState(0);
+  const [slots, setSlots] = useState(() =>
+    restored ? solvedSlots(3, 4) : makeShuffled(3, 4, dailyRng(3, 4)),
+  );
+  const [moves, setMoves] = useState(() => restored?.moves ?? 0);
+  const [seconds, setSeconds] = useState(() => restored?.seconds ?? 0);
   const [running, setRunning] = useState(false);
   const [showNumbers, setShowNumbers] = useState(false);
   const [showGuides, setShowGuides] = useState(true);
@@ -207,7 +272,7 @@ export default function SlidingPuzzle() {
   const [dragOver, setDragOver] = useState(false);
   const [lastMoved, setLastMoved] = useState(-1);
 
-  const [library] = useState(IMAGE_LIBRARY);
+  const [library, setLibrary] = useState([]);
   const [activeUrl, setActiveUrl] = useState(DEFAULT_IMAGE);
   const [jsonText, setJsonText] = useState("");
   const [jsonUrl, setJsonUrl] = useState("");
@@ -231,14 +296,20 @@ export default function SlidingPuzzle() {
     return map;
   }, [slots, total]);
 
-  // reset board whenever grid changes
+  // reset board whenever grid changes — back to today's board, not a new one.
+  // Once today is finished this becomes a no-op that re-asserts the solved
+  // board, so the async splash load can't reset a completed puzzle.
   const reshuffle = useCallback(() => {
-    setSlots(makeShuffled(rows, cols));
+    if (completed) {
+      setSlots(solvedSlots(rows, cols));
+      return;
+    }
+    setSlots(makeShuffled(rows, cols, dailyRng(rows, cols)));
     setMoves(0);
     setSeconds(0);
     setRunning(false);
     setLastMoved(-1);
-  }, [rows, cols]);
+  }, [rows, cols, completed]);
 
   useEffect(() => {
     reshuffle(); /* eslint-disable-next-line */
@@ -254,6 +325,14 @@ export default function SlidingPuzzle() {
   useEffect(() => {
     if (solved && running) setRunning(false);
   }, [solved, running]);
+
+  // Record the finish once. `completed` gates this, so a restored board never
+  // rewrites its own result and the original time/moves stand.
+  useEffect(() => {
+    if (!solved || completed) return;
+    setCompleted(true);
+    writeDailyRecord({ day: dayKey(), solved: true, seconds, moves });
+  }, [solved, completed, seconds, moves]);
 
   const tryMovePiece = useCallback(
     (piece) => {
@@ -322,6 +401,7 @@ export default function SlidingPuzzle() {
   };
 
   const selectUrl = useCallback((url) => {
+    console.log("selectUrl", url);
     setLibMsg("");
     const img = new Image();
     img.onload = () => {
@@ -336,6 +416,38 @@ export default function SlidingPuzzle() {
     img.src = url;
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadLibrary = async () => {
+      try {
+        setLibBusy(true);
+        setLibMsg("");
+
+        const images = await loadSplashLibrary();
+
+        if (cancelled) return;
+
+        setLibrary(images);
+        setLibMsg(`Loaded ${images.length} League splash images.`);
+      } catch (error) {
+        if (!cancelled) {
+          setLibMsg(`Could not load League splashes: ${error.message}`);
+        }
+      } finally {
+        if (!cancelled) {
+          setLibBusy(false);
+        }
+      }
+    };
+
+    loadLibrary();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const randomImage = useCallback(() => {
     if (!library.length) return;
     const pool = library.filter((it) => it.url !== activeUrl);
@@ -348,8 +460,8 @@ export default function SlidingPuzzle() {
   useEffect(() => {
     if (!library.length) return;
 
-    const pick = library[Math.floor(Math.random() * library.length)];
-    selectUrl(pick.url);
+    const pick = pickDailyImage(library);
+    if (pick) selectUrl(pick.url);
   }, [library, selectUrl]);
 
   const applyJson = () => {
@@ -727,7 +839,7 @@ export default function SlidingPuzzle() {
                     letterSpacing: ".02em",
                   }}
                 >
-                  Puzzle complete!
+                  {restored ? "Already solved today" : "Puzzle complete!"}
                 </div>
 
                 <p
@@ -738,7 +850,9 @@ export default function SlidingPuzzle() {
                     color: "rgba(235,255,243,.76)",
                   }}
                 >
-                  Nice work — you put the image back together.
+                  {restored
+                    ? "You finished today's puzzle. A new image and board arrive tomorrow."
+                    : "Nice work — you put the image back together."}
                 </p>
 
                 <div
@@ -839,6 +953,18 @@ export default function SlidingPuzzle() {
             {solved ? "Puzzle complete" : "Hover to peek"}
           </button>
         </div>
+        {libMsg && (
+          <p
+            style={{
+              margin: "12px 0 0",
+              color: "#ff9d9d",
+              fontFamily: "Inter, sans-serif",
+              fontSize: 13,
+            }}
+          >
+            {libMsg}
+          </p>
+        )}
       </div>
     </div>
   );
