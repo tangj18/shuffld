@@ -62,14 +62,12 @@ const DEFAULT_SVG = `
 const DEFAULT_IMAGE = `data:image/svg+xml,${encodeURIComponent(DEFAULT_SVG.trim())}`;
 const DEFAULT_ASPECT = 1200 / 700;
 
-const PRESETS = [
-  { rows: 3, cols: 4 },
-  { rows: 3, cols: 5 },
-  { rows: 4, cols: 4 },
-  { rows: 4, cols: 5 },
-  { rows: 4, cols: 6 },
-  { rows: 5, cols: 5 },
-];
+/* Two daily puzzles, both on the same day's image: same board for everyone,
+   one attempt each, result saved per mode. */
+const MODES = {
+  normal: { rows: 3, cols: 4, label: "Normal" },
+  hard: { rows: 5, cols: 5, label: "Hard" },
+};
 
 const SPLASH_ROOT = "/lol-splashes";
 
@@ -118,10 +116,26 @@ const hashString = (str) => {
   return h >>> 0;
 };
 
-// `library` is sorted by title, so the same index means the same splash for
-// everyone loading the same manifest.
-const pickDailyImage = (library, key = dayKey()) =>
-  library.length ? library[hashString(key) % library.length] : null;
+// Each mode gets its own image for the day, seeded by (date, mode) so the
+// whole set is still identical for everyone. `library` is sorted by title, so
+// the same index means the same splash on every machine.
+//
+// Modes are resolved in a fixed order and a collision walks forward to the
+// next free slot, which keeps Hard off whatever Normal already claimed.
+const pickDailyImage = (library, mode, key = dayKey()) => {
+  if (!library.length) return null;
+
+  const taken = new Set();
+  for (const name of Object.keys(MODES)) {
+    let index = hashString(`${key}:${name}`) % library.length;
+    while (taken.has(index) && taken.size < library.length) {
+      index = (index + 1) % library.length;
+    }
+    taken.add(index);
+    if (name === mode) return library[index];
+  }
+  return library[0];
+};
 
 // mulberry32 — a given seed always replays the same sequence, so the daily
 // scramble is identical for every player instead of per-load random.
@@ -223,48 +237,69 @@ const fmtTime = (s) => {
 const solvedSlots = (rows, cols) =>
   Array.from({ length: rows * cols }, (_, i) => i);
 
-/* ---------- daily result, persisted per browser ---------- *
- * One record, overwritten each day, so it cleans up after itself. Every
- * access is guarded: localStorage throws on access in some privacy modes
- * rather than just being empty, and a failure here should cost persistence,
- * not the game.
+/* ---------- daily results, persisted per browser ---------- *
+ * One record — { day, results: { <mode>: { seconds, moves } } } — overwritten
+ * each day, so it cleans up after itself. Every access is guarded:
+ * localStorage throws on access in some privacy modes rather than just being
+ * empty, and a failure here should cost persistence, not the game.
  * ------------------------------------------------------------------ */
-const STORAGE_KEY = "sliding-puzzle:daily:v1";
+const STORAGE_KEY = "sliding-puzzle:daily:v2";
 
-const readDailyRecord = () => {
+// Returns a { <mode>: { seconds, moves } } map — empty when today is unplayed.
+const readDailyResults = () => {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
+    if (!raw) return {};
     const record = JSON.parse(raw);
-    // A record from a previous day is stale — today's puzzle is unplayed.
-    if (!record || record.day !== dayKey() || !record.solved) return null;
-    return record;
+    // A record from a previous day is stale — today's puzzles are unplayed.
+    if (!record || record.day !== dayKey() || !record.results) return {};
+
+    // Rebuild from known modes only, so an edited or malformed payload can't
+    // put junk into state.
+    const clean = {};
+    for (const key of Object.keys(MODES)) {
+      const r = record.results[key];
+      if (r && Number.isFinite(r.seconds) && Number.isFinite(r.moves)) {
+        clean[key] = { seconds: r.seconds, moves: r.moves };
+      }
+    }
+    return clean;
   } catch {
-    return null;
+    return {};
   }
 };
 
-const writeDailyRecord = (record) => {
+const writeDailyResults = (results) => {
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(record));
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ day: dayKey(), results }),
+    );
   } catch {
     /* storage unavailable or full — the session still plays fine */
   }
 };
 
 export default function SlidingPuzzle() {
-  const [grid, setGrid] = useState({ rows: 3, cols: 4 });
-  // Read once on mount. If today's puzzle is already done, the board starts
-  // finished and stays that way.
-  const [restored] = useState(readDailyRecord);
-  const [completed, setCompleted] = useState(() => Boolean(restored));
+  const [mode, setMode] = useState("normal");
+  // Read once on mount, then kept in sync as puzzles are finished. A mode
+  // present here is done for the day, and its saved numbers are what the win
+  // card shows — so switching modes back and forth re-displays real results
+  // rather than whatever the other board left in the counters.
+  const [initialResults] = useState(readDailyResults);
+  const [results, setResults] = useState(initialResults);
   const [image, setImage] = useState(DEFAULT_IMAGE);
   const [aspect, setAspect] = useState(DEFAULT_ASPECT);
-  const [slots, setSlots] = useState(() =>
-    restored ? solvedSlots(3, 4) : makeShuffled(3, 4, dailyRng(3, 4)),
+  const [slots, setSlots] = useState(() => {
+    const { rows, cols } = MODES.normal;
+    return initialResults.normal
+      ? solvedSlots(rows, cols)
+      : makeShuffled(rows, cols, dailyRng(rows, cols));
+  });
+  const [moves, setMoves] = useState(() => initialResults.normal?.moves ?? 0);
+  const [seconds, setSeconds] = useState(
+    () => initialResults.normal?.seconds ?? 0,
   );
-  const [moves, setMoves] = useState(() => restored?.moves ?? 0);
-  const [seconds, setSeconds] = useState(() => restored?.seconds ?? 0);
   const [running, setRunning] = useState(false);
   const [showNumbers, setShowNumbers] = useState(false);
   const [showGuides, setShowGuides] = useState(true);
@@ -282,7 +317,14 @@ export default function SlidingPuzzle() {
 
   const fileRef = useRef(null);
   const boardRef = useRef(null);
-  const { rows, cols } = grid;
+  const { rows, cols } = MODES[mode];
+  // This mode's finished result for today, or null if it's still open.
+  const savedResult = results[mode] ?? null;
+  const completed = Boolean(savedResult);
+  // True only when the result was already on disk at mount — i.e. the player
+  // is revisiting, not finishing right now.
+  const wasRestored = Boolean(initialResults[mode]);
+  const otherMode = mode === "normal" ? "hard" : "normal";
   const total = rows * cols;
   const blank = total - 1;
   const solved = useMemo(() => isSolved(slots), [slots]);
@@ -296,12 +338,16 @@ export default function SlidingPuzzle() {
     return map;
   }, [slots, total]);
 
-  // reset board whenever grid changes — back to today's board, not a new one.
-  // Once today is finished this becomes a no-op that re-asserts the solved
-  // board, so the async splash load can't reset a completed puzzle.
+  // Rebuild the board on mode/image change. Once a mode is finished this
+  // re-asserts its solved board and saved numbers — which also stops the
+  // async splash load from resetting a completed puzzle.
   const reshuffle = useCallback(() => {
-    if (completed) {
+    if (savedResult) {
       setSlots(solvedSlots(rows, cols));
+      setSeconds(savedResult.seconds);
+      setMoves(savedResult.moves);
+      setRunning(false);
+      setLastMoved(-1);
       return;
     }
     setSlots(makeShuffled(rows, cols, dailyRng(rows, cols)));
@@ -309,7 +355,7 @@ export default function SlidingPuzzle() {
     setSeconds(0);
     setRunning(false);
     setLastMoved(-1);
-  }, [rows, cols, completed]);
+  }, [rows, cols, savedResult]);
 
   useEffect(() => {
     reshuffle(); /* eslint-disable-next-line */
@@ -326,13 +372,14 @@ export default function SlidingPuzzle() {
     if (solved && running) setRunning(false);
   }, [solved, running]);
 
-  // Record the finish once. `completed` gates this, so a restored board never
-  // rewrites its own result and the original time/moves stand.
+  // Record the finish once per mode. `completed` gates this, so a restored
+  // board never rewrites its own result and the original time/moves stand.
   useEffect(() => {
     if (!solved || completed) return;
-    setCompleted(true);
-    writeDailyRecord({ day: dayKey(), solved: true, seconds, moves });
-  }, [solved, completed, seconds, moves]);
+    const next = { ...results, [mode]: { seconds, moves } };
+    setResults(next);
+    writeDailyResults(next);
+  }, [solved, completed, results, mode, seconds, moves]);
 
   const tryMovePiece = useCallback(
     (piece) => {
@@ -448,21 +495,14 @@ export default function SlidingPuzzle() {
     };
   }, []);
 
-  const randomImage = useCallback(() => {
-    if (!library.length) return;
-    const pool = library.filter((it) => it.url !== activeUrl);
-    const pick = (pool.length ? pool : library)[
-      Math.floor(Math.random() * (pool.length ? pool.length : library.length))
-    ];
-    selectUrl(pick.url);
-  }, [library, activeUrl, selectUrl]);
-
+  // Today's splash for the active mode — Normal and Hard each get their own,
+  // so switching modes swaps the picture as well as the board.
   useEffect(() => {
     if (!library.length) return;
 
-    const pick = pickDailyImage(library);
+    const pick = pickDailyImage(library, mode);
     if (pick) selectUrl(pick.url);
-  }, [library, selectUrl]);
+  }, [library, mode, selectUrl]);
 
   const applyJson = () => {
     try {
@@ -543,6 +583,22 @@ export default function SlidingPuzzle() {
     width: "100%",
     marginTop: 20,
     justifyContent: "center",
+  });
+
+  // Button on the win card — tuned to the green card, not the blue chrome.
+  const winBtn = () => ({
+    width: "100%",
+    fontFamily: "'Chakra Petch',sans-serif",
+    fontSize: 13,
+    fontWeight: 700,
+    letterSpacing: ".02em",
+    color: "#06301c",
+    background: "linear-gradient(180deg,#b8ffd2,#55db91)",
+    border: "1px solid transparent",
+    borderRadius: 10,
+    padding: "10px 14px",
+    cursor: "pointer",
+    transition: "transform .1s, background .15s",
   });
 
   const stat = (label, value, accent) => (
@@ -644,9 +700,76 @@ export default function SlidingPuzzle() {
               maxWidth: 520,
             }}
           >
-            Tap a tile next to the gap to slide it. Arrow keys work too. Drop
-            your own image on the board to play with it.
+            Two puzzles a day, each with its own image. Everyone gets the same
+            boards — one attempt each, then it's locked in. Tap a tile next to
+            the gap to slide it; arrow keys work too.
           </p>
+
+          {/* mode toggle */}
+          <div
+            role="tablist"
+            aria-label="Puzzle mode"
+            style={{
+              display: "inline-flex",
+              gap: 4,
+              marginTop: 14,
+              padding: 4,
+              borderRadius: 12,
+              background: "rgba(255,255,255,.03)",
+              border: `1px solid ${C.edge}`,
+            }}
+          >
+            {Object.entries(MODES).map(([key, cfg]) => {
+              const active = key === mode;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setMode(key)}
+                  style={{
+                    fontFamily: "'Chakra Petch',sans-serif",
+                    fontSize: 12.5,
+                    fontWeight: 600,
+                    letterSpacing: ".04em",
+                    color: active ? C.bg : C.dim,
+                    background: active
+                      ? "linear-gradient(180deg,#bfe8ff,#6cbcff)"
+                      : "transparent",
+                    border: "none",
+                    borderRadius: 9,
+                    padding: "7px 16px",
+                    cursor: "pointer",
+                    transition: "background .15s, color .15s",
+                  }}
+                >
+                  {results[key] && (
+                    <span
+                      aria-label="solved"
+                      style={{
+                        marginRight: 6,
+                        color: active ? "#0b6b3f" : "#63e39b",
+                      }}
+                    >
+                      ✓
+                    </span>
+                  )}
+                  {cfg.label}
+                  <span
+                    style={{
+                      marginLeft: 7,
+                      opacity: 0.65,
+                      fontSize: 11,
+                      fontVariantNumeric: "tabular-nums",
+                    }}
+                  >
+                    {cfg.rows}×{cfg.cols}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         {/* board */}
@@ -839,7 +962,9 @@ export default function SlidingPuzzle() {
                     letterSpacing: ".02em",
                   }}
                 >
-                  {restored ? "Already solved today" : "Puzzle complete!"}
+                  {wasRestored
+                    ? `${MODES[mode].label} already solved`
+                    : "Puzzle complete!"}
                 </div>
 
                 <p
@@ -850,8 +975,8 @@ export default function SlidingPuzzle() {
                     color: "rgba(235,255,243,.76)",
                   }}
                 >
-                  {restored
-                    ? "You finished today's puzzle. A new image and board arrive tomorrow."
+                  {wasRestored
+                    ? "You already finished this one. A new image and boards arrive tomorrow."
                     : "Nice work — you put the image back together."}
                 </p>
 
@@ -929,6 +1054,17 @@ export default function SlidingPuzzle() {
                     </div>
                   </div>
                 </div>
+
+                {/* Nudge toward the mode that's still open today. */}
+                {!results[otherMode] && (
+                  <button
+                    type="button"
+                    onClick={() => setMode(otherMode)}
+                    style={winBtn()}
+                  >
+                    Try {MODES[otherMode].label} →
+                  </button>
+                )}
               </div>
             </>
           )}
