@@ -1,0 +1,14 @@
+/* The puzzle component paints its own background and fills its parent,
+   so we just make the app fill the viewport. */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #070b12;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}

@@ -1,0 +1,13 @@
+{
+  "_note": "Put your image links here, then reload the page. A plain array of URLs works too. Titles are optional.",
+  "images": [
+    {
+      "title": "Riven",
+      "url": "https://cdnb.artstation.com/p/assets/images/images/006/322/107/large/chengwei-pan-dawnbringer-riven-splash-final.jpg?1497694361"
+    },
+    {
+      "title": "Marino",
+      "url": "https://cdn.discordapp.com/attachments/1300917220439756992/1535796735270457384/marinobday.png?ex=6a7c5d6b&is=6a7b0beb&hm=0c351c7a8eb610e4d9fcff6f22f75dd94b9dfd0452c581b483d140075e5ae504&"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "name": "sliding-puzzle",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "A sliding-tile puzzle you play with any image — upload one or load a JSON library of hosted URLs.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11"
+  }
+}
