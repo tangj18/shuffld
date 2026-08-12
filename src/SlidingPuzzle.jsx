@@ -1035,36 +1035,6 @@ export default function SlidingPuzzle() {
                       {fmtTime(seconds)}
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      const cfg = MODES[mode];
-                      const board = Array.from({ length: cfg.rows }, () =>
-                        "🟦".repeat(cfg.cols),
-                      ).join("\n");
-
-                      const shareText = [
-                        `Sliding Puzzle — ${cfg.label} ${cfg.rows}×${cfg.cols}`,
-                        board,
-                        `⏱️ ${fmtTime(seconds)} · 🧩 ${moves} moves`,
-                        "",
-                        `Play: ${window.location.href}`,
-                      ].join("\n");
-
-                      try {
-                        await navigator.clipboard.writeText(shareText);
-                        alert("Result copied to clipboard!");
-                      } catch {
-                        alert("Could not copy the result automatically.");
-                      }
-                    }}
-                    style={{
-                      ...winBtn(),
-                      marginBottom: !results[otherMode] ? 9 : 0,
-                    }}
-                  >
-                    Share result
-                  </button>
 
                   <div
                     style={{
@@ -1099,6 +1069,37 @@ export default function SlidingPuzzle() {
                     </div>
                   </div>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const cfg = MODES[mode];
+                    const board = Array.from({ length: cfg.rows }, () =>
+                      "🟦".repeat(cfg.cols),
+                    ).join("\n");
+
+                    const shareText = [
+                      `Sliding Puzzle — ${cfg.label} ${cfg.rows}×${cfg.cols}`,
+                      board,
+                      `⏱️ ${fmtTime(seconds)} · 🧩 ${moves} moves`,
+                      "",
+                      `Play: ${window.location.href}`,
+                    ].join("\n");
+
+                    try {
+                      await navigator.clipboard.writeText(shareText);
+                      alert("Result copied to clipboard!");
+                    } catch {
+                      alert("Could not copy the result automatically.");
+                    }
+                  }}
+                  style={{
+                    ...winBtn(),
+                    marginBottom: !results[otherMode] ? 9 : 0,
+                  }}
+                >
+                  Share result
+                </button>
 
                 {/* Nudge toward the mode that's still open today. */}
                 {!results[otherMode] && (
