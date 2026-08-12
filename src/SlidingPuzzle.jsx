@@ -296,6 +296,11 @@ export default function SlidingPuzzle() {
       ? solvedSlots(rows, cols)
       : makeShuffled(rows, cols, dailyRng(rows, cols));
   });
+  // The mode `slots`, `moves` and `seconds` currently belong to. Switching
+  // mode changes `mode` a render before the board is rebuilt, so this lags by
+  // one render — which is what stops the outgoing board's solved state and
+  // counters from being read as the incoming mode's result.
+  const [boardMode, setBoardMode] = useState("normal");
   const [moves, setMoves] = useState(() => initialResults.normal?.moves ?? 0);
   const [seconds, setSeconds] = useState(
     () => initialResults.normal?.seconds ?? 0,
@@ -327,7 +332,11 @@ export default function SlidingPuzzle() {
   const otherMode = mode === "normal" ? "hard" : "normal";
   const total = rows * cols;
   const blank = total - 1;
-  const solved = useMemo(() => isSolved(slots), [slots]);
+  // Only meaningful once the board on screen is this mode's board.
+  const solved = useMemo(
+    () => boardMode === mode && isSolved(slots),
+    [boardMode, mode, slots],
+  );
 
   // piece -> current slot, for stable-identity rendering
   const pieceSlot = useMemo(() => {
@@ -342,6 +351,7 @@ export default function SlidingPuzzle() {
   // re-asserts its solved board and saved numbers — which also stops the
   // async splash load from resetting a completed puzzle.
   const reshuffle = useCallback(() => {
+    setBoardMode(mode);
     if (savedResult) {
       setSlots(solvedSlots(rows, cols));
       setSeconds(savedResult.seconds);
@@ -355,11 +365,11 @@ export default function SlidingPuzzle() {
     setSeconds(0);
     setRunning(false);
     setLastMoved(-1);
-  }, [rows, cols, savedResult]);
+  }, [mode, rows, cols, savedResult]);
 
   useEffect(() => {
     reshuffle(); /* eslint-disable-next-line */
-  }, [rows, cols, image]);
+  }, [mode, rows, cols, image]);
 
   // timer
   useEffect(() => {
@@ -374,6 +384,8 @@ export default function SlidingPuzzle() {
 
   // Record the finish once per mode. `completed` gates this, so a restored
   // board never rewrites its own result and the original time/moves stand.
+  // `solved` is false until the board matches `mode`, which keeps a finished
+  // board from being banked a second time under the mode you switched to.
   useEffect(() => {
     if (!solved || completed) return;
     const next = { ...results, [mode]: { seconds, moves } };
@@ -797,6 +809,9 @@ export default function SlidingPuzzle() {
         >
           {Array.from({ length: total }).map((_, piece) => {
             const slot = pieceSlot[piece];
+            // Mid-switch the old board is still in state and has no slot for
+            // this piece yet; skip it rather than positioning it at NaN%.
+            if (slot === undefined) return null;
             const col = slot % cols,
               row = Math.floor(slot / cols);
             const gCol = piece % cols,
